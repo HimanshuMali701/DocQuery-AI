@@ -666,19 +666,49 @@ def render_welcome_screen() -> None:
         f"""
         <div class="welcome-wrapper">
             <h1>{APP_ICON} {APP_TITLE}</h1>
-            <p>Upload one or more PDF files to create your knowledge base.</p>
-            <div class="feature-list">
-                ✔ Multi-document QA<br>
-                ✔ Conversation Memory<br>
-                ✔ Source Citation<br>
-                ✔ Semantic Search<br>
-                ✔ FAISS Vector Database
-            </div>
-            <p style="margin-top:2rem;">⬅ Start by uploading PDFs from the sidebar.</p>
+            <h3 style="margin-top:0.5rem;">
+                Chat intelligently with your PDF documents
+            </h3>
+            <p style="font-size:1.05rem; margin-bottom:2rem;">
+                Upload one or more PDF files to build your personal AI knowledge base
+                and ask questions in natural language.
+            </p>
         </div>
         """,
         unsafe_allow_html=True,
     )
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("""
+    #### ✨ Features
+
+    - 📄 Multi-PDF Chat
+    - 🧠 AI-Powered Answers
+    - 💬 Conversation Memory
+    - 📚 Source Citations
+    - 🔍 Smart Document Retrieval
+    - ⚡ Fast Responses
+    - 🔒 Secure Local Processing
+    """)
+    with col2:
+        st.markdown("""
+    #### 💡 Try Asking
+
+    - Summarize this document
+    - Explain Chapter 3
+    - Compare uploaded PDFs
+    - What are the key findings?
+    - List important dates
+    - Extract conclusions
+    """)
+    st.markdown(
+    """
+<div class="welcome-wrapper">
+<p>⬅ Upload your PDFs from the sidebar to get started.</p>
+</div>
+""",
+    unsafe_allow_html=True,
+)
 
 
 # ==========================================================
