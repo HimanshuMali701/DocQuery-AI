@@ -650,7 +650,8 @@ def format_sources(documents: Sequence[DocumentLike]) -> str:
 class RAGPipeline:
     """End-to-end Retrieval-Augmented Generation pipeline."""
 
-    def __init__(self, retriever: Any, llm: LLMLike, memory: ConversationMemory, logger: Any) -> None:
+    def __init__(self, retriever: Any, llm: LLMLike, memory: ConversationMemory, logger: Any, database=None,
+    conversation_id=None) -> None:
         """Initialize the pipeline.
 
         Args:
@@ -663,6 +664,8 @@ class RAGPipeline:
         self.llm = llm
         self.memory = memory
         self.logger = logger
+        self.database = database
+        self.conversation_id = conversation_id
 
     def ask(self, question: str) -> Dict[str, Any]:
         """Answer a question using retrieved context and the LLM.
@@ -674,6 +677,8 @@ class RAGPipeline:
             Response payload containing answer, sources, and retrieved documents.
         """
         validate_question(question)
+        if self.database and self.conversation_id:
+            self.database.save_message(self.conversation_id,"user",question)
         self.memory.add_message("user", question)
 
         documents = retrieve_context(self.retriever, question)
@@ -690,6 +695,8 @@ class RAGPipeline:
 
         answer = generate_answer(self.llm, prompt)
 
+        if self.database and self.conversation_id:
+            self.database.save_message(self.conversation_id,"assistant",answer)
         self.memory.add_message("assistant", answer)
 
         formatted_sources = format_sources(documents)
@@ -850,14 +857,21 @@ def reset_pipeline(memory: ConversationMemory, logger_obj: RAGLogger) -> None:
     logger.info("Pipeline reset completed.")
 
 
-def reset_session(memory: ConversationMemory, logger_obj: RAGLogger) -> None:
+def reset_session(
+    memory: ConversationMemory,
+    logger_obj: Optional[RAGLogger] = None,
+    logger: Optional[RAGLogger] = None,
+) -> None:
     """Reset the current chatbot session.
 
     Args:
         memory: Conversation memory instance.
         logger_obj: Logger instance.
+        logger: Logger instance alias.
     """
+    log_inst = logger if logger is not None else logger_obj
     reset_memory(memory)
-    reset_logger(logger_obj)
+    if log_inst is not None:
+        reset_logger(log_inst)
 
-    logger.info("Session reset successfully.")
+    logging.getLogger(__name__).info("Session reset successfully.")

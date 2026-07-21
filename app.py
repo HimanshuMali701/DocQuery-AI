@@ -14,7 +14,7 @@ import uuid
 from typing import Any, Dict, List, Optional, TypedDict
 
 import streamlit as st
-
+from database import * 
 from backend import (
     EMBEDDING_MODEL,
     LLM_MODEL,
@@ -289,27 +289,94 @@ def start_new_chat() -> None:
 
 
 def init_session_state() -> None:
-    """Initialize all required Streamlit session state variables."""
+    """Initialize all required Streamlit session state variables in a single place."""
     state = ss()
 
-    defaults: Dict[str, Any] = {
-        KEY_CHATS: {},
-        KEY_CURRENT_CHAT_ID: None,
-        KEY_CHAT_COUNTER: 0,
-        KEY_LOGGER: RAGLogger(),
-        KEY_KB_READY: False,
-        KEY_RETRIEVER: None,
-        KEY_LLM: None,
-        KEY_KB_STATS: {"documents": 0, "chunks": 0},
-        KEY_UPLOADED_PDF_NAMES: [],
-    }
+    # 1. Services and Managers
+    if "database" not in state:
+        state.database = DatabaseManager()
 
-    for key, value in defaults.items():
-        if key not in state:
-            state[key] = value
+    if "logger" not in state or KEY_LOGGER not in state:
+        logger_inst = RAGLogger()
+        state.logger = logger_inst
+        state[KEY_LOGGER] = logger_inst
 
-    if not state[KEY_CHATS]:
-        start_new_chat()
+    if "memory" not in state:
+        state.memory = ConversationMemory()
+
+    # 2. Knowledge Base Keys
+    if "retriever" not in state or KEY_RETRIEVER not in state:
+        state.retriever = None
+        state[KEY_RETRIEVER] = None
+
+    if "vector_store" not in state:
+        state.vector_store = None
+
+    if "llm" not in state or KEY_LLM not in state:
+        state.llm = None
+        state[KEY_LLM] = None
+
+    if "knowledge_base_ready" not in state or KEY_KB_READY not in state:
+        state.knowledge_base_ready = False
+        state[KEY_KB_READY] = False
+
+    if KEY_KB_STATS not in state:
+        state[KEY_KB_STATS] = {"documents": 0, "chunks": 0}
+
+    if KEY_UPLOADED_PDF_NAMES not in state:
+        state[KEY_UPLOADED_PDF_NAMES] = []
+
+    # 3. RAG Pipeline
+    if "pipeline" not in state:
+        state.pipeline = None
+
+    # 4. Active Chat & Conversation State
+    if "conversation_id" not in state:
+        state.conversation_id = None
+
+    if "current_chat_title" not in state:
+        state.current_chat_title = "New Chat"
+
+    if "messages" not in state:
+        state.messages = []
+
+    if KEY_CHATS not in state:
+        state[KEY_CHATS] = {}
+
+    if KEY_CURRENT_CHAT_ID not in state:
+        state[KEY_CURRENT_CHAT_ID] = None
+
+    if KEY_CHAT_COUNTER not in state:
+        state[KEY_CHAT_COUNTER] = 0
+
+    # Auto-load active or latest conversation from SQLite if conversation_id is None
+    if state.conversation_id is None:
+        conversations = state.database.get_all_conversations()
+        if conversations:
+            latest = conversations[0]
+            state.conversation_id = latest[0]
+            state.current_chat_title = latest[1]
+            state.messages = state.database.load_chat_history(latest[0])
+            state.memory.clear()
+            for msg in state.messages:
+                state.memory.add_message(msg.get("role", ""), msg.get("content", ""))
+        else:
+            new_id = state.database.create_conversation("New Chat")
+            state.conversation_id = new_id
+            state.current_chat_title = "New Chat"
+            state.messages = []
+            state.memory.clear()
+
+    # Sync KEY_CHATS dictionary structure
+    if not state[KEY_CHATS] or state[KEY_CURRENT_CHAT_ID] is None:
+        chat_id = str(uuid.uuid4())
+        state[KEY_CURRENT_CHAT_ID] = chat_id
+        state[KEY_CHATS][chat_id] = {
+            CHAT_KEY_TITLE: state.current_chat_title,
+            CHAT_KEY_MESSAGES: state.messages,
+            CHAT_KEY_MEMORY: state.memory,
+            CHAT_KEY_PIPELINE: state.pipeline,
+        }
 
 
 def get_current_chat() -> ChatEntry:
@@ -332,14 +399,27 @@ def ensure_pipeline_for_chat(chat: ChatEntry) -> RAGPipeline:
         Ready-to-use RAGPipeline instance for this chat.
     """
     state = ss()
-    if chat[CHAT_KEY_PIPELINE] is None:
-        chat[CHAT_KEY_PIPELINE] = RAGPipeline(
-            retriever=state[KEY_RETRIEVER],
-            llm=state[KEY_LLM],
-            memory=chat[CHAT_KEY_MEMORY],
-            logger=state[KEY_LOGGER],
+    retriever = state.get(KEY_RETRIEVER) or state.get("retriever")
+    llm = state.get(KEY_LLM) or state.get("llm")
+
+    if chat.get(CHAT_KEY_PIPELINE) is None or state.get("pipeline") is None:
+        pipeline = RAGPipeline(
+            retriever=retriever,
+            llm=llm,
+            memory=state.memory,
+            logger=state.logger,
+            database=state.database,
+            conversation_id=state.conversation_id,
         )
-    return chat[CHAT_KEY_PIPELINE]
+        chat[CHAT_KEY_PIPELINE] = pipeline
+        state.pipeline = pipeline
+    else:
+        pipeline = chat[CHAT_KEY_PIPELINE]
+        pipeline.conversation_id = state.conversation_id
+        pipeline.memory = state.memory
+        pipeline.database = state.database
+
+    return pipeline
 
 
 # ==========================================================
@@ -399,6 +479,7 @@ def _set_kb_session_values(
     documents_count: int,
     chunks_count: int,
     uploaded_files: List[Any],
+    vector_store: Any = None,
 ) -> None:
     """Store knowledge-base artifacts in session state.
 
@@ -408,16 +489,23 @@ def _set_kb_session_values(
         documents_count: Number of loaded documents.
         chunks_count: Number of generated chunks.
         uploaded_files: Uploaded Streamlit files.
+        vector_store: Built FAISS vector store.
     """
     state = ss()
     state[KEY_RETRIEVER] = retriever
+    state.retriever = retriever
     state[KEY_LLM] = llm
+    state.llm = llm
+    state.vector_store = vector_store
     state[KEY_KB_READY] = True
+    state.knowledge_base_ready = True
     state[KEY_KB_STATS] = {"documents": documents_count, "chunks": chunks_count}
     state[KEY_UPLOADED_PDF_NAMES] = [file.name for file in uploaded_files]
 
     # Rebuild active chat pipeline lazily against the refreshed KB.
-    get_current_chat()[CHAT_KEY_PIPELINE] = None
+    chat = get_current_chat()
+    chat[CHAT_KEY_PIPELINE] = None
+    state.pipeline = None
 
 
 def _progress_update(
@@ -499,7 +587,7 @@ def build_knowledge_base(uploaded_files: Optional[List[Any]]) -> None:
         )
         llm = get_cached_llm()
 
-        _set_kb_session_values(retriever, llm, len(documents), len(chunks), uploaded_files)
+        _set_kb_session_values(retriever, llm, len(documents), len(chunks), uploaded_files, vector_store)
 
         progress_bar.progress(1.0, text="✅ Ready")
         status_placeholder.success("✅ Knowledge Base Created Successfully!")
@@ -544,23 +632,67 @@ def render_kb_status_card() -> None:
 def render_chat_statistics() -> None:
     """Render simple chat statistics in the sidebar."""
     state = ss()
-    chat = get_current_chat()
+    conversations = (
+        st.session_state.database.get_all_conversations()
+    )
 
     col1, col2 = st.columns(2)
-    col1.metric("Messages", len(chat[CHAT_KEY_MESSAGES]))
-    col2.metric("Chats", len(state[KEY_CHATS]))
+
+    col1.metric(
+        "Messages",
+        len(st.session_state.messages),
+    )
+
+    col2.metric(
+        "Chats",
+        len(conversations),
+    )
 
 
 def _render_chat_list() -> None:
-    """Render the list of chat sessions in the sidebar."""
-    state = ss()
+    """Render all conversations stored in database."""
+    conversations = st.session_state.database.get_all_conversations()
 
     st.markdown("**💬 Chats**")
-    for chat_id, chat in state[KEY_CHATS].items():
-        is_active = chat_id == state[KEY_CURRENT_CHAT_ID]
-        label = f"{'🟢 ' if is_active else ''}{chat[CHAT_KEY_TITLE]}"
-        if st.button(label, key=f"chat_btn_{chat_id}", use_container_width=True):
-            state[KEY_CURRENT_CHAT_ID] = chat_id
+
+    for conversation in conversations:
+        conversation_id = conversation[0]
+        title = conversation[1]
+
+        is_active = (conversation_id == st.session_state.conversation_id)
+        label = f"{'🟢 ' if is_active else ''}{title}"
+
+        if st.button(
+            label,
+            key=f"chat_{conversation_id}",
+            use_container_width=True,
+        ):
+            st.session_state.conversation_id = conversation_id
+            st.session_state.current_chat_title = title
+
+            # Load chat history from SQLite
+            loaded_messages = st.session_state.database.load_chat_history(conversation_id)
+            st.session_state.messages = loaded_messages
+
+            # Rebuild ConversationMemory with loaded messages
+            st.session_state.memory.clear()
+            for message in loaded_messages:
+                st.session_state.memory.add_message(
+                    message.get("role", ""),
+                    message.get("content", "")
+                )
+
+            # Update current chat entry & pipeline
+            chat = get_current_chat()
+            chat[CHAT_KEY_TITLE] = title
+            chat[CHAT_KEY_MESSAGES] = loaded_messages
+            chat[CHAT_KEY_MEMORY] = st.session_state.memory
+            chat[CHAT_KEY_PIPELINE] = None
+
+            if st.session_state.pipeline:
+                st.session_state.pipeline.conversation_id = conversation_id
+                st.session_state.pipeline.memory = st.session_state.memory
+
             st.rerun()
 
 
@@ -590,7 +722,31 @@ def render_sidebar() -> Optional[List[Any]]:
         st.divider()
 
         if st.button("➕ New Chat", use_container_width=True):
-            start_new_chat()
+            # 1. Create a new conversation in SQLite
+            new_conv_id = st.session_state.database.create_conversation("New Chat")
+            st.session_state.conversation_id = new_conv_id
+            st.session_state.current_chat_title = "New Chat"
+
+            # 2. Reset session memory & logger
+            reset_session(
+                memory=st.session_state.memory,
+                logger_obj=st.session_state.logger,
+            )
+
+            # 3. Clear current messages in session state
+            st.session_state.messages = []
+
+            # 4. Update current chat structure and pipeline
+            chat = get_current_chat()
+            chat[CHAT_KEY_TITLE] = "New Chat"
+            chat[CHAT_KEY_MESSAGES] = []
+            chat[CHAT_KEY_MEMORY] = st.session_state.memory
+            chat[CHAT_KEY_PIPELINE] = None
+
+            if st.session_state.pipeline:
+                st.session_state.pipeline.conversation_id = new_conv_id
+                st.session_state.pipeline.memory = st.session_state.memory
+
             st.rerun()
 
         _render_chat_list()
@@ -620,7 +776,13 @@ def render_sidebar() -> Optional[List[Any]]:
         if st.button("🗑️ Clear This Conversation", use_container_width=True):
             clear_current_conversation()
             st.rerun()
-
+        if st.button("🗑️ Delete this Chat", use_container_width=True):
+            st.session_state.database.delete_conversation(st.session_state.conversation_id)
+            st.session_state.conversation_id = None
+            st.session_state.current_chat_title = None
+            st.session_state.messages = []
+            st.session_state.memory.clear()
+            st.rerun()
         render_sidebar_footer()
 
     return uploaded_files
@@ -642,18 +804,25 @@ def render_sidebar_footer() -> None:
 
 def clear_current_conversation() -> None:
     """Reset memory/logger and clear messages of the active chat."""
-    state = ss()
+    reset_session(
+        memory=st.session_state.memory,
+        logger_obj=st.session_state.logger,
+    )
+
+    if st.session_state.conversation_id is not None:
+        if hasattr(st.session_state.database, "clear_chat_history"):
+            st.session_state.database.clear_chat_history(
+                st.session_state.conversation_id
+            )
+        elif hasattr(st.session_state.database, "delete_messages"):
+            st.session_state.database.delete_messages(
+                st.session_state.conversation_id
+            )
+
+    st.session_state.messages = []
     chat = get_current_chat()
-
-    try:
-        reset_session(memory=chat[CHAT_KEY_MEMORY], logger_obj=state[KEY_LOGGER])
-    except TypeError:
-        # Compatibility fallback for older signature.
-        reset_session(chat[CHAT_KEY_MEMORY], state[KEY_LOGGER])
-
     chat[CHAT_KEY_MESSAGES] = []
-    chat[CHAT_KEY_PIPELINE] = None
-
+    chat[CHAT_KEY_MEMORY].clear()
 
 # ==========================================================
 # Welcome Screen
@@ -735,12 +904,13 @@ def render_chat_history(chat: ChatEntry) -> None:
     Args:
         chat: Active chat session dictionary.
     """
-    for message in chat[CHAT_KEY_MESSAGES]:
-        role = message["role"]
+    messages = st.session_state.messages if st.session_state.messages else chat.get(CHAT_KEY_MESSAGES, [])
+    for message in messages:
+        role = message.get("role", "")
         avatar = "👤" if role == ROLE_USER else "🤖"
 
         with st.chat_message(role, avatar=avatar):
-            st.markdown(message["content"])
+            st.markdown(message.get("content", ""))
             if role == ROLE_ASSISTANT:
                 render_sources(message.get("sources"))
 
@@ -771,7 +941,11 @@ def handle_user_question(question: str, chat: ChatEntry) -> None:
         question: Question typed by the user.
         chat: Active chat session dictionary.
     """
-    chat[CHAT_KEY_MESSAGES].append({"role": ROLE_USER, "content": question})
+    user_msg: ChatMessage = {"role": ROLE_USER, "content": question}
+    if user_msg not in st.session_state.messages:
+        st.session_state.messages.append(user_msg)
+    if chat.get(CHAT_KEY_MESSAGES) is not st.session_state.messages and user_msg not in chat[CHAT_KEY_MESSAGES]:
+        chat[CHAT_KEY_MESSAGES].append(user_msg)
 
     with st.chat_message(ROLE_USER, avatar="👤"):
         st.markdown(question)
@@ -782,6 +956,14 @@ def handle_user_question(question: str, chat: ChatEntry) -> None:
 
         try:
             pipeline = ensure_pipeline_for_chat(chat)
+            if st.session_state.conversation_id is None:
+                conversation_id = st.session_state.database.create_conversation("New Chat")
+                st.session_state.conversation_id = conversation_id
+                st.session_state.current_chat_title = "New Chat"
+
+            pipeline.conversation_id = st.session_state.conversation_id
+            pipeline.memory = st.session_state.memory
+
             response = pipeline.ask(question)
 
             answer = response.get("answer", "")
@@ -790,17 +972,20 @@ def handle_user_question(question: str, chat: ChatEntry) -> None:
             stream_answer(placeholder, answer)
             render_sources(sources)
 
-            chat[CHAT_KEY_MESSAGES].append(
-                {"role": ROLE_ASSISTANT, "content": answer, "sources": sources}
-            )
+            assistant_msg: ChatMessage = {"role": ROLE_ASSISTANT, "content": answer, "sources": sources}
+            if assistant_msg not in st.session_state.messages:
+                st.session_state.messages.append(assistant_msg)
+            if chat.get(CHAT_KEY_MESSAGES) is not st.session_state.messages and assistant_msg not in chat[CHAT_KEY_MESSAGES]:
+                chat[CHAT_KEY_MESSAGES].append(assistant_msg)
 
         except Exception as error:
             placeholder.empty()
             error_message = f"❌ Something went wrong: {error}"
             st.error(error_message)
-            chat[CHAT_KEY_MESSAGES].append(
-                {"role": ROLE_ASSISTANT, "content": error_message, "sources": None}
-            )
+            err_msg: ChatMessage = {"role": ROLE_ASSISTANT, "content": error_message, "sources": None}
+            st.session_state.messages.append(err_msg)
+            if chat.get(CHAT_KEY_MESSAGES) is not st.session_state.messages and err_msg not in chat[CHAT_KEY_MESSAGES]:
+                chat[CHAT_KEY_MESSAGES].append(err_msg)
 
 
 # ==========================================================
