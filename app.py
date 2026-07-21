@@ -1,11 +1,3 @@
-"""ChatGPT-style Streamlit frontend for the RAG PDF Chatbot.
-
-This module only implements the user interface. All retrieval-augmented
-generation logic (document loading, chunking, embeddings, vector store,
-retriever, LLM, memory, logging) lives in `backend.py` and is used here
-without changing backend API contracts.
-"""
-
 from __future__ import annotations
 
 import os
