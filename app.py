@@ -4,7 +4,7 @@ import os
 import time
 import uuid
 from typing import Any, Dict, List, Optional, TypedDict
-
+from auth import login_user, register_user
 import streamlit as st
 from database import * 
 from backend import (
@@ -77,6 +77,100 @@ def ss() -> Any:
     """
     return st.session_state
 
+# Authentication Page
+
+def authentication_page():
+
+    st.title("🔐 RAG PDF Chatbot")
+
+    tab1, tab2 = st.tabs(["Login", "Sign Up"])
+
+    # ---------------- LOGIN ---------------- #
+
+    with tab1:
+
+        st.subheader("Login")
+
+        email = st.text_input(
+            "Email",
+            key="login_email"
+        )
+
+        password = st.text_input(
+            "Password",
+            type="password",
+            key="login_password"
+        )
+
+        if st.button("Login"):
+
+            success, result = login_user(email, password)
+
+            if success:
+
+                st.session_state.logged_in = True
+                st.session_state.user = result
+                st.session_state.user_id = result["id"]
+
+                st.success("Login Successful!")
+
+                st.rerun()
+
+            else:
+
+                st.error(result)
+
+    # ---------------- SIGNUP ---------------- #
+
+    with tab2:
+
+        st.subheader("Create Account")
+
+        name = st.text_input(
+            "Full Name",
+            key="signup_name"
+        )
+
+        email = st.text_input(
+            "Email",
+            key="signup_email"
+        )
+
+        password = st.text_input(
+            "Password",
+            type="password",
+            key="signup_password"
+        )
+
+        confirm = st.text_input(
+            "Confirm Password",
+            type="password",
+            key="signup_confirm"
+        )
+
+        if st.button("Create Account"):
+
+            if password != confirm:
+                st.error("Passwords do not match.")
+
+            elif len(password) < 8:
+                st.error("Password must be at least 8 characters.")
+
+            else:
+
+                success, msg = register_user(
+                    name,
+                    email,
+                    password
+                )
+
+                if success:
+
+                    st.success(msg)
+
+                else:
+
+                    st.error(msg)
 
 # ==========================================================
 # Page Configuration
@@ -284,6 +378,16 @@ def init_session_state() -> None:
     """Initialize all required Streamlit session state variables in a single place."""
     state = ss()
 
+    # 0. Authentication Session Keys
+    if "logged_in" not in state:
+        state.logged_in = False
+
+    if "user" not in state:
+        state.user = None
+
+    if "user_id" not in state:
+        state.user_id = None
+
     # 1. Services and Managers
     if "database" not in state:
         state.database = DatabaseManager()
@@ -342,33 +446,34 @@ def init_session_state() -> None:
         state[KEY_CHAT_COUNTER] = 0
 
     # Auto-load active or latest conversation from SQLite if conversation_id is None
-    if state.conversation_id is None:
-        conversations = state.database.get_all_conversations()
-        if conversations:
-            latest = conversations[0]
-            state.conversation_id = latest[0]
-            state.current_chat_title = latest[1]
-            state.messages = state.database.load_chat_history(latest[0])
-            state.memory.clear()
-            for msg in state.messages:
-                state.memory.add_message(msg.get("role", ""), msg.get("content", ""))
-        else:
-            new_id = state.database.create_conversation("New Chat")
-            state.conversation_id = new_id
-            state.current_chat_title = "New Chat"
-            state.messages = []
-            state.memory.clear()
+    if state.get("logged_in"):
+        if state.conversation_id is None:
+            conversations = state.database.get_all_conversations(state.user_id)
+            if conversations:
+                latest = conversations[0]
+                state.conversation_id = latest[0]
+                state.current_chat_title = latest[1]
+                state.messages = state.database.load_chat_history(latest[0])
+                state.memory.clear()
+                for msg in state.messages:
+                    state.memory.add_message(msg.get("role", ""), msg.get("content", ""))
+            else:
+                new_id = state.database.create_conversation("New Chat", state.user_id)
+                state.conversation_id = new_id
+                state.current_chat_title = "New Chat"
+                state.messages = []
+                state.memory.clear()
 
-    # Sync KEY_CHATS dictionary structure
-    if not state[KEY_CHATS] or state[KEY_CURRENT_CHAT_ID] is None:
-        chat_id = str(uuid.uuid4())
-        state[KEY_CURRENT_CHAT_ID] = chat_id
-        state[KEY_CHATS][chat_id] = {
-            CHAT_KEY_TITLE: state.current_chat_title,
-            CHAT_KEY_MESSAGES: state.messages,
-            CHAT_KEY_MEMORY: state.memory,
-            CHAT_KEY_PIPELINE: state.pipeline,
-        }
+        # Sync KEY_CHATS dictionary structure
+        if not state[KEY_CHATS] or state[KEY_CURRENT_CHAT_ID] is None:
+            chat_id = str(uuid.uuid4())
+            state[KEY_CURRENT_CHAT_ID] = chat_id
+            state[KEY_CHATS][chat_id] = {
+                CHAT_KEY_TITLE: state.current_chat_title,
+                CHAT_KEY_MESSAGES: state.messages,
+                CHAT_KEY_MEMORY: state.memory,
+                CHAT_KEY_PIPELINE: state.pipeline,
+            }
 
 
 def get_current_chat() -> ChatEntry:
@@ -711,6 +816,21 @@ def render_sidebar() -> Optional[List[Any]]:
         st.markdown(f"## {APP_ICON} {APP_TITLE}")
         st.caption(APP_DESCRIPTION)
 
+        if st.session_state.logged_in and st.session_state.user:
+            st.divider()
+            st.markdown(f"Welcome **{st.session_state.user['name']}**")
+            st.caption(f"Logged-in: {st.session_state.user['email']}")
+            if st.button("Logout", use_container_width=True):
+                st.session_state.logged_in = False
+                st.session_state.user = None
+                st.session_state.user_id = None
+                st.session_state.conversation_id = None
+                st.session_state.messages = []
+                st.session_state.memory.clear()
+                st.session_state[KEY_CHATS] = {}
+                st.session_state[KEY_CURRENT_CHAT_ID] = None
+                st.rerun()
+
         st.divider()
 
         if st.button("➕ New Chat", use_container_width=True):
@@ -1008,6 +1128,10 @@ def main() -> None:
     configure_page()
     inject_custom_css()
     init_session_state()
+
+    if not st.session_state.logged_in:
+        authentication_page()
+        st.stop()
 
     render_sidebar()
 
