@@ -18,9 +18,10 @@ class DatabaseManager:
         """
         Create a SQLite connection.
         """
-
-        return sqlite3.connect(self.database_name)
-
+        conn = sqlite3.connect(self.database_name)
+        conn.row_factory = sqlite3.Row
+        return conn
+    
     def initialize_database(self):
         """
         Create required tables if they do not exist.
@@ -31,14 +32,24 @@ class DatabaseManager:
         cursor = connection.cursor()
 
         cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                email TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        cursor.execute("""
         CREATE TABLE IF NOT EXISTS conversations (
 
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-            title TEXT NOT NULL,
-
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-
+            user_id INTEGER NOT NULL,
+            title TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(user_id)
+            REFERENCES users(id)
         )
         """)
 
@@ -61,10 +72,64 @@ class DatabaseManager:
         )
         """)
 
+        # Migration: Check if user_id column exists in conversations table
+        cursor.execute("PRAGMA table_info(conversations)")
+        columns = [row["name"] for row in cursor.fetchall()]
+        if "user_id" not in columns:
+            cursor.execute("ALTER TABLE conversations ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1")
+
         connection.commit()
 
         connection.close()        
     
+    def create_user(self, name, email, password_hash):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            INSERT INTO users(name, email, password_hash)
+            VALUES (?, ?, ?)
+            """,
+            (name, email, password_hash)
+        )
+
+        conn.commit()
+        conn.close()
+
+    def get_user_by_email(self, email):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT * FROM users
+            WHERE email = ?
+            """,
+            (email,)
+        )
+
+        user = cursor.fetchone()
+        conn.close()
+        return user
+
+    def get_user(self, user_id):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT *
+            FROM users
+            WHERE id = ?
+            """,
+            (user_id,)
+        )
+
+        user = cursor.fetchone()
+        conn.close()
+        return user
+
     def show_tables(self):
         """
         Display all database tables.
@@ -89,7 +154,7 @@ class DatabaseManager:
         connection.close()
 
         return tables
-    def create_conversation(self, title="New Chat"):
+    def create_conversation(self, title="New Chat", user_id=None):
         """
         Create a new conversation.
 
@@ -97,6 +162,8 @@ class DatabaseManager:
         ----------
         title : str
             Conversation title.
+        user_id : int, optional
+            The user ID this conversation belongs to.
 
         Returns
         -------
@@ -107,12 +174,29 @@ class DatabaseManager:
         connection = self.get_connection()
         cursor = connection.cursor()
 
+        # If user_id is not provided, try to find a default user or use a dummy ID like 1 if no user exists.
+        if user_id is None:
+            try:
+                import streamlit as st
+                if "user_id" in st.session_state and st.session_state.user_id is not None:
+                    user_id = st.session_state.user_id
+            except ImportError:
+                pass
+
+        if user_id is None:
+            cursor.execute("SELECT id FROM users LIMIT 1")
+            row = cursor.fetchone()
+            if row:
+                user_id = row[0]
+            else:
+                user_id = 1 # Fallback dummy ID
+
         cursor.execute(
             """
-            INSERT INTO conversations (title)
-            VALUES (?)
+            INSERT INTO conversations (user_id, title)
+            VALUES (?, ?)
             """,
-            (title,)
+            (user_id, title)
         )
 
         conversation_id = cursor.lastrowid
@@ -122,26 +206,50 @@ class DatabaseManager:
 
         return conversation_id
 
-    def get_all_conversations(self):
+    def get_all_conversations(self, user_id=None):
         """
         Return all conversations.
+
+        Parameters
+        ----------
+        user_id : int, optional
+            Filter conversations by this user ID.
 
         Returns
         -------
         list
         """
 
+        if user_id is None:
+            try:
+                import streamlit as st
+                if "user_id" in st.session_state and st.session_state.user_id is not None:
+                    user_id = st.session_state.user_id
+            except ImportError:
+                pass
+
         connection = self.get_connection()
         cursor = connection.cursor()
 
-        cursor.execute("""
-            SELECT
-                id,
-                title,
-                created_at
-            FROM conversations
-            ORDER BY created_at DESC
-        """)
+        if user_id is not None:
+            cursor.execute("""
+                SELECT
+                    id,
+                    title,
+                    created_at
+                FROM conversations
+                WHERE user_id = ?
+                ORDER BY created_at DESC
+            """, (user_id,))
+        else:
+            cursor.execute("""
+                SELECT
+                    id,
+                    title,
+                    created_at
+                FROM conversations
+                ORDER BY created_at DESC
+            """)
 
         conversations = cursor.fetchall()
 
@@ -383,3 +491,16 @@ if __name__ == "__main__":
     print(history)
 
 
+database = DatabaseManager()
+
+
+def create_user(name, email, password_hash):
+    return database.create_user(name, email, password_hash)
+
+
+def get_user_by_email(email):
+    return database.get_user_by_email(email)
+
+
+def get_user(user_id):
+    return database.get_user(user_id)
