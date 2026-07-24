@@ -4,6 +4,7 @@ import os
 import time
 import uuid
 from typing import Any, Dict, List, Optional, TypedDict
+import storage_manager
 from auth import login_user, register_user
 import streamlit as st
 from database import * 
@@ -20,6 +21,7 @@ from backend import (
     initialize_llm,
     load_documents,
     reset_session,
+    save_vector_store,
 )
 
 # ==========================================================
@@ -457,12 +459,14 @@ def init_session_state() -> None:
                 state.memory.clear()
                 for msg in state.messages:
                     state.memory.add_message(msg.get("role", ""), msg.get("content", ""))
+                load_conversation_knowledge_base(state.user_id, state.conversation_id)
             else:
                 new_id = state.database.create_conversation("New Chat", state.user_id)
                 state.conversation_id = new_id
                 state.current_chat_title = "New Chat"
                 state.messages = []
                 state.memory.clear()
+                load_conversation_knowledge_base(state.user_id, state.conversation_id)
 
         # Sync KEY_CHATS dictionary structure
         if not state[KEY_CHATS] or state[KEY_CURRENT_CHAT_ID] is None:
@@ -517,6 +521,60 @@ def ensure_pipeline_for_chat(chat: ChatEntry) -> RAGPipeline:
         pipeline.database = state.database
 
     return pipeline
+
+
+def load_conversation_knowledge_base(user_id: int, conversation_id: int) -> None:
+    """Load documents and vector store for the selected conversation if they exist."""
+    state = ss()
+    
+    # 1. Fetch documents from the database
+    docs = state.database.get_documents_by_conversation(conversation_id)
+    
+    if docs:
+        try:
+            # Recreate retriever and load vector store
+            embedding_model = get_cached_embedding_model()
+            from backend import load_vector_store, create_retriever
+            vector_store = load_vector_store(embedding_model, user_id=user_id, conversation_id=conversation_id)
+            retriever = create_retriever(vector_store)
+            llm = get_cached_llm()
+            
+            # Set session values
+            _set_kb_session_values(
+                retriever=retriever,
+                llm=llm,
+                documents_count=len(docs),
+                chunks_count=vector_store.index.ntotal,
+                uploaded_files=[],  # Empty since files are loaded from disk
+                vector_store=vector_store
+            )
+            # Override KEY_UPLOADED_PDF_NAMES since uploaded_files was empty list
+            state[KEY_UPLOADED_PDF_NAMES] = [doc["original_filename"] for doc in docs]
+            
+            # Rebuild active chat pipeline
+            if state.get(KEY_CURRENT_CHAT_ID) is not None:
+                chat = get_current_chat()
+                chat[CHAT_KEY_PIPELINE] = None
+            state.pipeline = None
+            return
+        except Exception as e:
+            # If load fails (e.g. file missing on disk but present in DB), log warning and fall back
+            pass
+            
+    # If no documents or loading failed, mark knowledge base as not ready
+    state[KEY_KB_READY] = False
+    state.knowledge_base_ready = False
+    state[KEY_KB_STATS] = {"documents": 0, "chunks": 0}
+    state[KEY_UPLOADED_PDF_NAMES] = []
+    state.vector_store = None
+    state.retriever = None
+    state[KEY_RETRIEVER] = None
+    
+    # Rebuild active chat pipeline
+    if state.get(KEY_CURRENT_CHAT_ID) is not None:
+        chat = get_current_chat()
+        chat[CHAT_KEY_PIPELINE] = None
+    state.pipeline = None
 
 
 # ==========================================================
@@ -640,7 +698,18 @@ def build_knowledge_base(uploaded_files: Optional[List[Any]]) -> None:
     total_steps = 6
 
     try:
-        pdf_paths = save_uploaded_pdfs(uploaded_files)
+        user_id = st.session_state.user_id
+        conversation_id = st.session_state.conversation_id
+
+        # 1. Clean up old documents/vectorstore for this conversation from disk and DB
+        storage_manager.delete_uploaded_pdfs(user_id, conversation_id)
+        storage_manager.delete_vectorstore(user_id, conversation_id)
+        st.session_state.database.delete_conversation_documents(conversation_id)
+
+        # 2. Save new PDFs using storage_manager
+        saved_paths = storage_manager.save_uploaded_files(user_id, conversation_id, uploaded_files)
+        # Convert path objects to strings for compatibility with backend.py
+        pdf_paths = [str(p) for p in saved_paths]
 
         _progress_update(progress_bar, status_placeholder, 1, total_steps, "📂 Loading PDFs...")
         documents = load_documents(pdf_paths)
@@ -665,6 +734,21 @@ def build_knowledge_base(uploaded_files: Optional[List[Any]]) -> None:
 
         _progress_update(progress_bar, status_placeholder, 4, total_steps, "📚 Building FAISS...")
         vector_store = build_vector_store(chunks, embedding_model)
+
+        # 3. Save vector store using storage_manager
+        save_vector_store(vector_store, user_id=user_id, conversation_id=conversation_id)
+        vectorstore_path = storage_manager.get_vectorstore_dir(user_id, conversation_id)
+
+        # 4. Save documents to database
+        for saved_path, file in zip(saved_paths, uploaded_files):
+            st.session_state.database.add_document(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                original_filename=file.name,
+                stored_filename=file.name,
+                file_path=str(saved_path),
+                vectorstore_path=str(vectorstore_path)
+            )
 
         _progress_update(
             progress_bar,
@@ -737,7 +821,7 @@ def render_chat_statistics() -> None:
 
     col1.metric(
         "Messages",
-        len(st.session_state.messages),
+        int(len(st.session_state.messages)/2),
     )
 
     col2.metric(
@@ -778,6 +862,9 @@ def _render_chat_list() -> None:
                     message.get("role", ""),
                     message.get("content", "")
                 )
+
+            # Load knowledge base for this conversation
+            load_conversation_knowledge_base(st.session_state.user_id, conversation_id)
 
             # Update current chat entry & pipeline
             chat = get_current_chat()
@@ -839,6 +926,9 @@ def render_sidebar() -> Optional[List[Any]]:
             st.session_state.conversation_id = new_conv_id
             st.session_state.current_chat_title = "New Chat"
 
+            # Load (reset) knowledge base for this empty conversation
+            load_conversation_knowledge_base(st.session_state.user_id, new_conv_id)
+
             # 2. Reset session memory & logger
             reset_session(
                 memory=st.session_state.memory,
@@ -889,6 +979,8 @@ def render_sidebar() -> Optional[List[Any]]:
             clear_current_conversation()
             st.rerun()
         if st.button("🗑️ Delete this Chat", use_container_width=True):
+            if st.session_state.conversation_id is not None:
+                storage_manager.delete_conversation_storage(st.session_state.user_id, st.session_state.conversation_id)
             st.session_state.database.delete_conversation(st.session_state.conversation_id)
             st.session_state.conversation_id = None
             st.session_state.current_chat_title = None
@@ -1139,7 +1231,11 @@ def main() -> None:
     chat = get_current_chat()
 
     if not state[KEY_KB_READY]:
-        render_welcome_screen()
+        if not chat.get(CHAT_KEY_MESSAGES) and not state.messages:
+            render_welcome_screen()
+        else:
+            render_chat_history(chat)
+            st.warning("This conversation has no uploaded documents.")
     else:
         render_chat_history(chat)
         question = st.chat_input("Ask a question about your uploaded PDF...")
