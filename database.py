@@ -78,6 +78,21 @@ class DatabaseManager:
         if "user_id" not in columns:
             cursor.execute("ALTER TABLE conversations ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1")
 
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS documents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            conversation_id INTEGER NOT NULL,
+            original_filename TEXT NOT NULL,
+            stored_filename TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            vectorstore_path TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(user_id) REFERENCES users(id),
+            FOREIGN KEY(conversation_id) REFERENCES conversations(id)
+        )
+        """)
+
         connection.commit()
 
         connection.close()        
@@ -332,6 +347,14 @@ class DatabaseManager:
 
         cursor.execute(
             """
+            DELETE FROM documents
+            WHERE conversation_id = ?
+            """,
+            (conversation_id,)
+        )
+
+        cursor.execute(
+            """
             DELETE FROM conversations
             WHERE id = ?    
             """,
@@ -470,6 +493,106 @@ class DatabaseManager:
             })
 
         return history   
+    def add_document(self, user_id, conversation_id, original_filename, stored_filename, file_path, vectorstore_path=None):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO documents (user_id, conversation_id, original_filename, stored_filename, file_path, vectorstore_path)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, conversation_id, original_filename, stored_filename, str(file_path), str(vectorstore_path) if vectorstore_path else None)
+        )
+        doc_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        return doc_id
+
+    def get_documents_by_conversation(self, conversation_id):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT * FROM documents
+            WHERE conversation_id = ?
+            ORDER BY created_at ASC
+            """,
+            (conversation_id,)
+        )
+        docs = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return docs
+
+    def get_documents_by_user(self, user_id):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT * FROM documents
+            WHERE user_id = ?
+            ORDER BY created_at ASC
+            """,
+            (user_id,)
+        )
+        docs = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return docs
+
+    def delete_document(self, document_id):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            DELETE FROM documents
+            WHERE id = ?
+            """,
+            (document_id,)
+        )
+        conn.commit()
+        conn.close()
+
+    def delete_conversation_documents(self, conversation_id):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            DELETE FROM documents
+            WHERE conversation_id = ?
+            """,
+            (conversation_id,)
+        )
+        conn.commit()
+        conn.close()
+
+    def update_vectorstore_path(self, conversation_id, vectorstore_path):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE documents
+            SET vectorstore_path = ?
+            WHERE conversation_id = ?
+            """,
+            (str(vectorstore_path) if vectorstore_path else None, conversation_id)
+        )
+        conn.commit()
+        conn.close()
+
+    def get_vectorstore_path(self, conversation_id):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT vectorstore_path FROM documents
+            WHERE conversation_id = ? AND vectorstore_path IS NOT NULL
+            LIMIT 1
+            """,
+            (conversation_id,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else None
+
     def reset_database(self):
         """
         Delete all tables and recreate them.
@@ -479,6 +602,7 @@ class DatabaseManager:
         cursor = connection.cursor()
 
         cursor.execute("DROP TABLE IF EXISTS messages")
+        cursor.execute("DROP TABLE IF EXISTS documents")
         cursor.execute("DROP TABLE IF EXISTS conversations")
 
         self.initialize_database()
@@ -504,3 +628,31 @@ def get_user_by_email(email):
 
 def get_user(user_id):
     return database.get_user(user_id)
+
+
+def add_document(user_id, conversation_id, original_filename, stored_filename, file_path, vectorstore_path=None):
+    return database.add_document(user_id, conversation_id, original_filename, stored_filename, file_path, vectorstore_path)
+
+
+def get_documents_by_conversation(conversation_id):
+    return database.get_documents_by_conversation(conversation_id)
+
+
+def get_documents_by_user(user_id):
+    return database.get_documents_by_user(user_id)
+
+
+def delete_document(document_id):
+    return database.delete_document(document_id)
+
+
+def delete_conversation_documents(conversation_id):
+    return database.delete_conversation_documents(conversation_id)
+
+
+def update_vectorstore_path(conversation_id, vectorstore_path):
+    return database.update_vectorstore_path(conversation_id, vectorstore_path)
+
+
+def get_vectorstore_path(conversation_id):
+    return database.get_vectorstore_path(conversation_id)
