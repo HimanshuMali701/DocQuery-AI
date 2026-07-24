@@ -30,6 +30,7 @@ FAISS_INDEX_PATH: str = "faiss_index"
 import json
 import logging
 import os
+import storage_manager
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -313,40 +314,51 @@ def build_vector_store(chunks: Sequence[DocumentLike], embedding_model: Any):
     return vector_store
 
 
-def save_vector_store(vector_store: Any) -> None:
+def save_vector_store(vector_store: Any, user_id: Optional[int] = None, conversation_id: Optional[int] = None) -> None:
     """Save the FAISS vector store to disk.
 
     Args:
         vector_store: FAISS vector store instance.
+        user_id: User ID (optional).
+        conversation_id: Conversation ID (optional).
     """
-    vector_store.save_local(FAISS_INDEX_PATH)
+    if user_id is not None and conversation_id is not None:
+        storage_manager.save_faiss(vector_store, user_id, conversation_id)
+        logger.info("Vector Store saved for user_%s/conv_%s", user_id, conversation_id)
+    else:
+        vector_store.save_local(FAISS_INDEX_PATH)
+        logger.info("Vector Store saved to '%s'", FAISS_INDEX_PATH)
 
-    logger.info("Vector Store saved to '%s'", FAISS_INDEX_PATH)
 
-
-def load_vector_store(embedding_model: Any):
+def load_vector_store(embedding_model: Any, user_id: Optional[int] = None, conversation_id: Optional[int] = None):
     """Load an existing FAISS vector store.
 
     Args:
         embedding_model: Embedding model used for loading.
+        user_id: User ID (optional).
+        conversation_id: Conversation ID (optional).
 
     Returns:
         Loaded FAISS vector store.
     """
-    if not os.path.exists(FAISS_INDEX_PATH):
-        raise FileNotFoundError(f"No FAISS index found at '{FAISS_INDEX_PATH}'.")
+    if user_id is not None and conversation_id is not None:
+        logger.info("Loading FAISS Vector Store for user_%s/conv_%s...", user_id, conversation_id)
+        return storage_manager.load_faiss(user_id, conversation_id, embedding_model)
+    else:
+        if not os.path.exists(FAISS_INDEX_PATH):
+            raise FileNotFoundError(f"No FAISS index found at '{FAISS_INDEX_PATH}'.")
 
-    logger.info("Loading FAISS Vector Store...")
+        logger.info("Loading FAISS Vector Store...")
 
-    vector_store = FAISS.load_local(
-        FAISS_INDEX_PATH,
-        embedding_model,
-        allow_dangerous_deserialization=True
-    )
+        vector_store = FAISS.load_local(
+            FAISS_INDEX_PATH,
+            embedding_model,
+            allow_dangerous_deserialization=True
+        )
 
-    logger.info("Vector Store loaded successfully.")
+        logger.info("Vector Store loaded successfully.")
 
-    return vector_store
+        return vector_store
 
 
 def vector_store_info(vector_store: Any) -> None:
