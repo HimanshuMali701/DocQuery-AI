@@ -821,7 +821,7 @@ def render_chat_statistics() -> None:
 
     col1.metric(
         "Messages",
-        int(len(st.session_state.messages)),
+        int(len(st.session_state.messages)/2),
     )
 
     col2.metric(
