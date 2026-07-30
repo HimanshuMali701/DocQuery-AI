@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, TypedDict
 import storage_manager
 from auth import login_user, register_user
 import streamlit as st
-from database import * 
+from postgres_db import * 
 from backend import (
     EMBEDDING_MODEL,
     LLM_MODEL,
@@ -18,6 +18,7 @@ from backend import (
     chunk_documents,
     create_embedding_model,
     create_retriever,
+    generate_chat_title,
     initialize_llm,
     load_documents,
     reset_session,
@@ -113,6 +114,7 @@ def authentication_page():
                 st.session_state.logged_in = True
                 st.session_state.user = result
                 st.session_state.user_id = result["id"]
+                st.session_state.view = "dashboard"
 
                 st.success("Login Successful!")
 
@@ -339,6 +341,33 @@ def inject_custom_css() -> None:
             font-size: 1.02rem;
             line-height: 2;
         }
+
+        /* ---------- Dashboard & Setup ---------- */
+        .info-card {
+            background-color: #1f2130;
+            border: 1px solid #2b2d3a;
+            border-radius: 12px;
+            padding: 1.5rem;
+            height: 100%;
+            transition: all 0.2s ease-in-out;
+        }
+        .info-card:hover {
+            border-color: #6c63ff;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(108, 99, 255, 0.1);
+        }
+        .recent-conv-card {
+            background-color: #1f2130;
+            border: 1px solid #2b2d3a;
+            border-radius: 12px;
+            padding: 1.2rem;
+            margin-bottom: 0.8rem;
+            transition: all 0.2s ease-in-out;
+        }
+        .recent-conv-card:hover {
+            border-color: #6c63ff;
+            box-shadow: 0 4px 12px rgba(108, 99, 255, 0.08);
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -429,6 +458,12 @@ def init_session_state() -> None:
         state.pipeline = None
 
     # 4. Active Chat & Conversation State
+    if "view" not in state:
+        state.view = "dashboard"
+
+    if "setup_step" not in state:
+        state.setup_step = "upload"
+
     if "conversation_id" not in state:
         state.conversation_id = None
 
@@ -769,6 +804,7 @@ def build_knowledge_base(uploaded_files: Optional[List[Any]]) -> None:
         llm = get_cached_llm()
 
         _set_kb_session_values(retriever, llm, len(documents), len(chunks), uploaded_files, vector_store)
+        st.session_state.setup_step = "ready"
 
         progress_bar.progress(1.0, text="✅ Ready")
         status_placeholder.success("✅ Knowledge Base Created Successfully!")
@@ -877,6 +913,7 @@ def _render_chat_list() -> None:
                 st.session_state.pipeline.conversation_id = conversation_id
                 st.session_state.pipeline.memory = st.session_state.memory
 
+            st.session_state.view = "chat"
             st.rerun()
 
 
@@ -902,12 +939,21 @@ def render_sidebar() -> Optional[List[Any]]:
     with st.sidebar:
         st.markdown(f"## {APP_ICON} {APP_TITLE}")
         st.caption(APP_DESCRIPTION)
+        st.write("")
 
+        # 1. USER PROFILE SECTION
         if st.session_state.logged_in and st.session_state.user:
-            st.divider()
-            st.markdown(f"Welcome **{st.session_state.user['name']}**")
-            st.caption(f"Logged-in: {st.session_state.user['email']}")
-            if st.button("Logout", use_container_width=True):
+            st.markdown("### 👤 User Profile")
+            st.markdown(
+                f"""
+                <div style="background-color: #1f2130; border: 1px solid #2b2d3a; border-radius: 10px; padding: 0.8rem; margin-bottom: 0.6rem;">
+                    <div style="font-size: 0.95rem; font-weight: 600; color: #f5f5f7;">{st.session_state.user['name']}</div>
+                    <div style="font-size: 0.8rem; color: #8a8d9a;">{st.session_state.user['email']}</div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+            if st.button("Logout", use_container_width=True, key="sidebar_logout"):
                 st.session_state.logged_in = False
                 st.session_state.user = None
                 st.session_state.user_id = None
@@ -916,11 +962,19 @@ def render_sidebar() -> Optional[List[Any]]:
                 st.session_state.memory.clear()
                 st.session_state[KEY_CHATS] = {}
                 st.session_state[KEY_CURRENT_CHAT_ID] = None
+                st.session_state.view = "dashboard"
                 st.rerun()
+            st.write("")
 
-        st.divider()
+        # Navigation to Dashboard
+        if st.button("🏛️ Workspace Dashboard", use_container_width=True, key="sidebar_dashboard"):
+            st.session_state.view = "dashboard"
+            st.rerun()
+        st.write("")
 
-        if st.button("➕ New Chat", use_container_width=True):
+        # 2. CONVERSATIONS SECTION
+        st.markdown("### 💬 Conversations")
+        if st.button("➕ New Conversation", use_container_width=True, key="sidebar_new_chat"):
             # 1. Create a new conversation in SQLite
             new_conv_id = st.session_state.database.create_conversation("New Chat")
             st.session_state.conversation_id = new_conv_id
@@ -949,44 +1003,64 @@ def render_sidebar() -> Optional[List[Any]]:
                 st.session_state.pipeline.conversation_id = new_conv_id
                 st.session_state.pipeline.memory = st.session_state.memory
 
+            st.session_state.view = "setup"
+            st.session_state.setup_step = "upload"
             st.rerun()
 
         _render_chat_list()
+        st.write("")
 
-        st.divider()
-
-        st.markdown("**📤 Upload PDFs**")
-        uploaded_files = st.file_uploader(
-            "Upload PDF Files",
-            type=["pdf"],
-            accept_multiple_files=True,
-            label_visibility="collapsed",
+        # 3. KNOWLEDGE BASE SECTION
+        st.markdown("### 🧠 Knowledge Base")
+        
+        pdf_names = st.session_state.get(KEY_UPLOADED_PDF_NAMES, [])
+        pdf_count = len(pdf_names)
+        ready = st.session_state.get(KEY_KB_READY, False)
+        
+        status_html = "🟢 Ready" if ready else "🔴 Not Built"
+        
+        st.markdown(
+            f"""
+            <div style="background-color: #1f2130; border: 1px solid #2b2d3a; border-radius: 10px; padding: 0.8rem; margin-bottom: 0.6rem;">
+                <div style="font-size: 0.9rem; font-weight: 600; color: #f5f5f7;">Status: {status_html}</div>
+                <div style="font-size: 0.85rem; color: #8a8d9a; margin-top: 4px;">Documents: <strong>{pdf_count}</strong></div>
+            </div>
+            """,
+            unsafe_allow_html=True
         )
+        
+        if pdf_count > 0:
+            for name in pdf_names:
+                st.markdown(f"<span style='font-size: 0.88rem; color: #d7d8e0; display: block; margin-left: 4px;'>📄 {name}</span>", unsafe_allow_html=True)
+            st.write("")
 
-        if st.button("🚀 Build Knowledge Base", use_container_width=True):
-            build_knowledge_base(uploaded_files)
+        with st.expander("📥 Manage Documents", expanded=False):
+            uploaded_files = st.file_uploader(
+                "Upload PDF Files",
+                type=["pdf"],
+                accept_multiple_files=True,
+                label_visibility="collapsed",
+                key="sidebar_pdf_uploader"
+            )
 
-        st.divider()
+            if st.button("🚀 Build Knowledge Base", use_container_width=True, key="sidebar_build_kb"):
+                build_knowledge_base(uploaded_files)
+                st.rerun()
 
-        render_kb_status_card()
-        _render_uploaded_pdf_list()
-
-        st.divider()
-
-        render_chat_statistics()
-
-        if st.button("🗑️ Clear This Conversation", use_container_width=True):
-            clear_current_conversation()
-            st.rerun()
-        if st.button("🗑️ Delete this Chat", use_container_width=True):
-            if st.session_state.conversation_id is not None:
-                storage_manager.delete_conversation_storage(st.session_state.user_id, st.session_state.conversation_id)
-            st.session_state.database.delete_conversation(st.session_state.conversation_id)
-            st.session_state.conversation_id = None
-            st.session_state.current_chat_title = None
-            st.session_state.messages = []
-            st.session_state.memory.clear()
-            st.rerun()
+            if st.button("🗑️ Clear This Conversation", use_container_width=True, key="sidebar_clear_conv"):
+                clear_current_conversation()
+                st.rerun()
+                
+            if st.button("🗑️ Delete this Chat", use_container_width=True, key="sidebar_delete_chat"):
+                if st.session_state.conversation_id is not None:
+                    storage_manager.delete_conversation_storage(st.session_state.user_id, st.session_state.conversation_id)
+                st.session_state.database.delete_conversation(st.session_state.conversation_id)
+                st.session_state.conversation_id = None
+                st.session_state.current_chat_title = None
+                st.session_state.messages = []
+                st.session_state.memory.clear()
+                st.session_state.view = "dashboard"
+                st.rerun()
         render_sidebar_footer()
 
     return uploaded_files
@@ -1182,6 +1256,25 @@ def handle_user_question(question: str, chat: ChatEntry) -> None:
             if chat.get(CHAT_KEY_MESSAGES) is not st.session_state.messages and assistant_msg not in chat[CHAT_KEY_MESSAGES]:
                 chat[CHAT_KEY_MESSAGES].append(assistant_msg)
 
+            # Generate chat title if it's the first message (current title is "New Chat")
+            conversation = st.session_state.database.get_conversation(st.session_state.conversation_id)
+            if conversation and conversation["title"] == "New Chat":
+                try:
+                    llm = st.session_state.get("llm") or get_cached_llm()
+                    if llm:
+                        new_title = generate_chat_title(llm, question)
+                        if new_title:
+                            st.session_state.database.update_conversation_title(
+                                st.session_state.conversation_id,
+                                new_title
+                            )
+                            st.session_state.current_chat_title = new_title
+                            chat[CHAT_KEY_TITLE] = new_title
+                            st.rerun()
+                except Exception as title_err:
+                    import logging
+                    logging.getLogger(__name__).warning(f"Failed to generate chat title: {title_err}")
+
         except Exception as error:
             placeholder.empty()
             error_message = f"❌ Something went wrong: {error}"
@@ -1211,6 +1304,253 @@ def render_footer() -> None:
 
 
 # ==========================================================
+# Dashboard & Setup helpers
+# ==========================================================
+
+from datetime import datetime
+
+def get_conversation_stats(db: DatabaseManager, conversation_id: int) -> Dict[str, Any]:
+    """Retrieve message count and last updated timestamp for a conversation."""
+    messages = db.get_messages(conversation_id)
+    msg_count = len(messages)
+    
+    if msg_count > 0:
+        last_updated = messages[-1]["timestamp"]
+    else:
+        conv = db.get_conversation(conversation_id)
+        last_updated = conv["created_at"] if conv else "Unknown"
+        
+    return {
+        "message_count": msg_count,
+        "last_updated": last_updated
+    }
+
+
+def format_timestamp(ts_str: str) -> str:
+    """Format a SQLite timestamp string into a friendly readable format."""
+    try:
+        dt = datetime.strptime(ts_str.split(".")[0], "%Y-%m-%d %H:%M:%S")
+        return dt.strftime("%b %d, %Y, %I:%M %p")
+    except Exception:
+        return ts_str
+
+
+def render_dashboard() -> None:
+    """Render the AI Workspace Dashboard landing page."""
+    st.markdown(
+        """
+        <div style="text-align: center; padding: 2.5rem 1rem 1.5rem 1rem;">
+            <h1 style="font-size: 3rem; font-weight: 700; margin-bottom: 0.5rem;">🤖 DocQuery AI</h1>
+            <h3 style="font-size: 1.3rem; font-weight: 400; color: #8a8d9a; margin-bottom: 1.5rem;">
+                Chat intelligently with your PDF documents.
+            </h3>
+            <p style="font-size: 1.05rem; color: #d7d8e0; max-width: 600px; margin: 0 auto 2.5rem auto; line-height: 1.6;">
+                Upload documents, build an AI knowledge base, and ask natural language questions.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("➕ New Conversation", use_container_width=True, key="dash_btn_new_chat", type="primary"):
+            new_conv_id = st.session_state.database.create_conversation("New Chat")
+            st.session_state.conversation_id = new_conv_id
+            st.session_state.current_chat_title = "New Chat"
+            load_conversation_knowledge_base(st.session_state.user_id, new_conv_id)
+            reset_session(
+                memory=st.session_state.memory,
+                logger_obj=st.session_state.logger,
+            )
+            st.session_state.messages = []
+            
+            chat = get_current_chat()
+            chat[CHAT_KEY_TITLE] = "New Chat"
+            chat[CHAT_KEY_MESSAGES] = []
+            chat[CHAT_KEY_MEMORY] = st.session_state.memory
+            chat[CHAT_KEY_PIPELINE] = None
+            
+            st.session_state.view = "setup"
+            st.session_state.setup_step = "upload"
+            st.rerun()
+            
+    with col2:
+        if st.button("📂 Continue Previous Chats", use_container_width=True, key="dash_btn_continue"):
+            st.info("💡 Scroll down to view and load your Recent Conversations.")
+
+    st.markdown("<hr style='border-color: #2b2d3a; margin: 2.5rem 0 3rem 0;'>", unsafe_allow_html=True)
+    
+    # 3 modern cards
+    card1, card2, card3 = st.columns(3)
+    with card1:
+        st.markdown(
+            """
+            <div class="info-card">
+                <h4 style="color: #f5f5f7; margin: 0 0 0.8rem 0; font-size: 1.15rem;">📄 Upload Documents</h4>
+                <p style="color: #8a8d9a; font-size: 0.92rem; line-height: 1.5; margin: 0;">
+                    Upload one or multiple PDF documents directly into your workspace.
+                </p>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    with card2:
+        st.markdown(
+            """
+            <div class="info-card">
+                <h4 style="color: #f5f5f7; margin: 0 0 0.8rem 0; font-size: 1.15rem;">🧠 AI Knowledge Base</h4>
+                <p style="color: #8a8d9a; font-size: 0.92rem; line-height: 1.5; margin: 0;">
+                    Each conversation has its own isolated knowledge base. Documents are never shared between conversations.
+                </p>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    with card3:
+        st.markdown(
+            """
+            <div class="info-card">
+                <h4 style="color: #f5f5f7; margin: 0 0 0.8rem 0; font-size: 1.15rem;">💬 Chat Naturally</h4>
+                <p style="color: #8a8d9a; font-size: 0.92rem; line-height: 1.5; margin: 0;">
+                    Ask questions, summarize, compare, extract data, and analyze key information easily.
+                </p>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    st.markdown("### 📂 Recent Conversations")
+    
+    conversations = st.session_state.database.get_all_conversations(st.session_state.user_id)
+    if not conversations:
+        st.info("No conversations found. Click 'New Conversation' to get started!")
+    else:
+        for i in range(0, len(conversations), 2):
+            cols = st.columns(2)
+            for j in range(2):
+                if i + j < len(conversations):
+                    conv = conversations[i + j]
+                    conv_id = conv[0]
+                    title = conv[1]
+                    
+                    stats = get_conversation_stats(st.session_state.database, conv_id)
+                    formatted_time = format_timestamp(stats["last_updated"])
+                    
+                    with cols[j]:
+                        st.markdown(
+                            f"""
+                            <div class="recent-conv-card">
+                                <h4 style="margin: 0; color: #f5f5f7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 1.1rem;">💬 {title}</h4>
+                                <p style="font-size: 0.85rem; color: #8a8d9a; margin: 6px 0 10px 0; line-height: 1.4;">
+                                    Last Active: <strong>{formatted_time}</strong><br>
+                                    Messages: <strong>{stats['message_count']}</strong>
+                                </p>
+                            </div>
+                            """,
+                            unsafe_allow_html=True
+                        )
+                        if st.button("Open Chat →", key=f"dash_chat_{conv_id}", use_container_width=True):
+                            st.session_state.conversation_id = conv_id
+                            st.session_state.current_chat_title = title
+                            
+                            loaded_messages = st.session_state.database.load_chat_history(conv_id)
+                            st.session_state.messages = loaded_messages
+                            st.session_state.memory.clear()
+                            for msg in loaded_messages:
+                                st.session_state.memory.add_message(msg.get("role", ""), msg.get("content", ""))
+                                
+                            load_conversation_knowledge_base(st.session_state.user_id, conv_id)
+                            
+                            chat = get_current_chat()
+                            chat[CHAT_KEY_TITLE] = title
+                            chat[CHAT_KEY_MESSAGES] = loaded_messages
+                            chat[CHAT_KEY_MEMORY] = st.session_state.memory
+                            chat[CHAT_KEY_PIPELINE] = None
+                            
+                            st.session_state.view = "chat"
+                            st.rerun()
+
+
+def render_setup_step_indicator(current_step: str) -> None:
+    """Render a step status bar for the setup page."""
+    cols = st.columns(3)
+    steps = [
+        ("Step 1", "Upload PDFs", "upload"),
+        ("Step 2", "Build Knowledge Base", "build"),
+        ("Step 3", "Start Chatting", "ready")
+    ]
+    for idx, (label, desc, step_id) in enumerate(steps):
+        with cols[idx]:
+            is_active = (current_step == step_id)
+            is_done = (step_id == "upload" and current_step in ["build", "ready"]) or (step_id == "build" and current_step == "ready")
+            
+            border_style = "border-color: #6c63ff;" if is_active else ("border-color: #3ddc84;" if is_done else "border-color: #2b2d3a;")
+            bg_style = "background-color: rgba(108, 99, 255, 0.08);" if is_active else ("background-color: rgba(61, 220, 132, 0.04);" if is_done else "background-color: transparent;")
+            text_color = "#f5f5f7" if is_active or is_done else "#8a8d9a"
+            badge = "🟢" if is_active else ("✅" if is_done else "⚪")
+            
+            st.markdown(
+                f"""
+                <div style="border: 1px solid; border-radius: 10px; padding: 0.8rem; text-align: center; {border_style} {bg_style}">
+                    <div style="font-size: 0.75rem; color: #8a8d9a; text-transform: uppercase; font-weight: 600;">{label}</div>
+                    <div style="font-size: 0.95rem; font-weight: 500; margin-top: 4px; color: {text_color};">{badge} {desc}</div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+
+def render_conversation_setup_page(chat: ChatEntry) -> None:
+    """Render the setup page guiding the user in building a knowledge base."""
+    st.markdown("## Create New Conversation")
+    
+    if st.session_state.setup_step in ["upload", "build"]:
+        render_setup_step_indicator(st.session_state.setup_step)
+        st.write("")
+        
+        uploaded_files = st.file_uploader(
+            "Upload PDF files for this conversation",
+            type=["pdf"],
+            accept_multiple_files=True,
+            key="setup_pdf_uploader"
+        )
+        
+        if uploaded_files:
+            st.markdown(f"#### ✓ {len(uploaded_files)} PDF{'s' if len(uploaded_files) > 1 else ''} Selected")
+            for f in uploaded_files:
+                st.markdown(f"<span style='color: #3ddc84; font-size: 0.95rem; margin-left: 5px;'>📄 {f.name}</span>", unsafe_allow_html=True)
+            st.write("")
+            
+            if st.button("🚀 Build Knowledge Base", use_container_width=True, type="primary"):
+                # Run the actual build
+                with st.spinner("Processing documents and building Knowledge Base..."):
+                    build_knowledge_base(uploaded_files)
+                st.rerun()
+                
+    elif st.session_state.setup_step == "ready":
+        render_setup_step_indicator("ready")
+        st.write("")
+        
+        st.markdown(
+            """
+            <div style="text-align: center; padding: 2.5rem 1.5rem; background-color: #1f2130; border: 1px solid #2b2d3a; border-radius: 12px; margin-bottom: 2rem;">
+                <h2 style="color: #3ddc84; font-size: 2rem; margin: 0 0 0.8rem 0;">✅ Knowledge Base Ready</h2>
+                <p style="color: #d7d8e0; font-size: 1.1rem; line-height: 1.6; margin: 0;">
+                    Your documents have been processed successfully. AI is ready.
+                </p>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+        
+        if st.button("Start Chat →", use_container_width=True, type="primary"):
+            st.session_state.view = "chat"
+            st.rerun()
+
+
+# ==========================================================
 # Main Application
 # ==========================================================
 
@@ -1230,17 +1570,34 @@ def main() -> None:
     state = ss()
     chat = get_current_chat()
 
-    if not state[KEY_KB_READY]:
-        if not chat.get(CHAT_KEY_MESSAGES) and not state.messages:
-            render_welcome_screen()
+    if state.view == "dashboard":
+        render_dashboard()
+    elif state.view == "setup":
+        render_conversation_setup_page(chat)
+    elif state.view == "chat":
+        # Check if Knowledge Base exists
+        if not state[KEY_KB_READY]:
+            st.markdown(
+                """
+                <div style="text-align: center; padding: 4rem 1rem; background-color: #1f2130; border: 1px solid #2b2d3a; border-radius: 12px; max-width: 600px; margin: 2rem auto;">
+                    <h2 style="font-size: 3rem; margin-bottom: 1rem; color: #ff6b6b;">📂</h2>
+                    <h3 style="color: #f5f5f7;">No Knowledge Base Found</h3>
+                    <p style="color: #8a8d9a; margin-top: 0.5rem; margin-bottom: 2rem; font-size: 1.05rem;">
+                        Upload one or more PDF documents to start chatting.
+                    </p>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+            if st.button("Upload PDFs", use_container_width=True, type="primary", key="empty_state_upload"):
+                st.session_state.view = "setup"
+                st.session_state.setup_step = "upload"
+                st.rerun()
         else:
             render_chat_history(chat)
-            st.warning("This conversation has no uploaded documents.")
-    else:
-        render_chat_history(chat)
-        question = st.chat_input("Ask a question about your uploaded PDF...")
-        if question:
-            handle_user_question(question, chat)
+            question = st.chat_input("Ask a question about your uploaded PDF...")
+            if question:
+                handle_user_question(question, chat)
 
     render_footer()
 

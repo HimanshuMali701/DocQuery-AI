@@ -1,5 +1,5 @@
 import bcrypt
-from database import create_user, get_user_by_email
+from postgres_db import create_user, get_user_by_email
 
 def hash_password(password: str) -> str:
     """
