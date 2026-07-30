@@ -1,4 +1,5 @@
 import sqlite3
+import psycopg
 from pathlib import Path
 
 DATABASE_NAME = "chatbot.db"
@@ -656,3 +657,7 @@ def update_vectorstore_path(conversation_id, vectorstore_path):
 
 def get_vectorstore_path(conversation_id):
     return database.get_vectorstore_path(conversation_id)
+
+
+def update_conversation_title(conversation_id, new_title):
+    return database.update_conversation_title(conversation_id, new_title)
