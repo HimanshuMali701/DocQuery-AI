@@ -30,6 +30,7 @@ FAISS_INDEX_PATH: str = "faiss_index"
 import json
 import logging
 import os
+import re
 import storage_manager
 from collections import defaultdict
 from datetime import datetime
@@ -603,6 +604,65 @@ def generate_answer(llm: LLMLike, prompt: str) -> str:
     response = llm.invoke(prompt)
 
     return response.content
+
+
+def generate_chat_title(llm: LLMLike, first_question: str) -> str:
+    """Generate a concise, Title Case conversation title using the same LLM.
+
+    Args:
+        llm: Configured LLM instance.
+        first_question: The first user question.
+
+    Returns:
+        A cleaned, short conversation title.
+    """
+    system_prompt = (
+        "You are an AI that generates concise conversation titles.\n"
+        "Generate a title between 3 and 6 words.\n"
+        "Do not use quotation marks.\n"
+        "Do not add punctuation.\n"
+        "Do not include words like Chat, Conversation, Discussion.\n"
+        "Return ONLY the title."
+    )
+    
+    prompt = [
+        ("system", system_prompt),
+        ("human", first_question)
+    ]
+    
+    try:
+        response = llm.invoke(prompt)
+        raw_title = response.content.strip()
+        
+        # Clean title according to rules
+        # 1. Remove markdown formatting (*, _, `, ~)
+        cleaned = re.sub(r'[*_`~]', '', raw_title)
+        # 2. Remove quotes (double, single, smart quotes)
+        cleaned = re.sub(r'[\'"`“”‘’]', '', cleaned)
+        # 3. Remove leading numbering like "1. ", "1 - ", etc.
+        cleaned = re.sub(r'^\d+[\s\.\)-]+', '', cleaned)
+        # 4. Remove emoji and special punctuation, keep alphanumeric, spaces, and hyphens
+        cleaned = re.sub(r'[^\w\s-]', '', cleaned)
+        
+        # Clean up spaces
+        cleaned = " ".join(cleaned.split())
+        
+        # Limit words: 3 to 6 words
+        words = cleaned.split()
+        if len(words) > 6:
+            words = words[:6]
+        
+        # Apply custom Title Case (preserving original case for acronyms/mixed-case words)
+        title_words = []
+        for w in words:
+            if w:
+                title_words.append(w[0].upper() + w[1:])
+        
+        final_title = " ".join(title_words)
+        return final_title
+    except Exception as e:
+        logger.warning("Failed to generate chat title: %s", e)
+        return ""
 
 
 # ==========================================================
